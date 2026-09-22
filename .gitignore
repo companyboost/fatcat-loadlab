@@ -19,3 +19,8 @@ admin-local.env
 results/
 *.json.gz
 summary-*.json
+
+# The k6 scenarios carry internal capacity figures in their comments and stay
+# in the private workspace (loadtest/). Only the simulator needs to be public,
+# because Railway deploys it from here.
+k6/

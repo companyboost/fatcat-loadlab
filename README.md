@@ -1,101 +1,91 @@
 # fatcat-loadlab
 
-The isolated staging and load-testing environment for FatCat Arena: a Hyperliquid
-simulator, a k6 load harness, and the runbook that wires them to a staging stack which
-shares **nothing** with production.
+Staging and load-testing harness for FatCat Arena: a Hyperliquid simulator, a k6 load
+suite, and the environment runbook.
 
-This repository contains **no product source code and no credentials.** It is the
-harness; the system under test is deployed separately from its own repositories.
+This repository contains **no product source code and no credentials.** It is the harness;
+the system under test is deployed separately from its own repositories.
+
+> **Why this repo is public:** Railway's GitHub integration deploys the simulator from here,
+> and it cannot read a private repository. Everything in this repo is therefore written to be
+> safe in the open. Operational detail about the system under test — capacity figures,
+> failure modes, internal endpoints — lives in the private workspace, not here. Please keep
+> it that way when adding to this repo.
 
 ---
 
 ## Why the product code is not forked here
 
-The obvious reading of "a completely separate staging codebase" is to copy the backend
-into this repo and point it at test infrastructure. That is the one thing this design
-deliberately does not do.
+The obvious reading of "a separate staging codebase" is to copy the backend into this repo
+and point it at test infrastructure. That is the one thing this design deliberately does not
+do.
 
 A forked copy starts identical and diverges within days. Once it has, every number it
-produces describes the fork, not the product — and the entire purpose of the exercise is
-to predict how **production** behaves at 10,000 concurrent duels. A staging environment
-that runs different code is not a staging environment; it is a second product.
+produces describes the fork rather than the product — and the whole purpose is to predict how
+**production** behaves under load. A staging environment running different code is not a
+staging environment; it is a second product.
 
-Isolation is therefore achieved at the **infrastructure** layer, not the source layer:
-
-| Layer | Production | Staging |
-|---|---|---|
-| Backend source | `companyboost/fatcat-backend` @ `main` | **the same repo and branch** |
-| App source | `dukestudios/fatcat-app` @ `main` | **the same repo and branch** |
-| Railway project | `modest-balance` | **its own project** |
-| Supabase | its own project | **its own project** |
-| Redis (Upstash) | its own instance | **its own instance** |
-| Vercel project | `fatcat-app` | **its own project** |
-| Hyperliquid | real testnet | **the simulator in this repo** |
-| Escrow | its own Arbitrum Sepolia deployment | **its own deployment** |
-
-Railway deploys a service directly from a GitHub repository. A **new Railway project**
-pointed at `companyboost/fatcat-backend` therefore gives a staging backend running
-identical code **without a single change to that repository** — no new branch, no CI
-change, no workflow edit. The existing apps are untouched by construction.
-
-> This also sidesteps a live defect: `WORKER_SERVICE_ENABLED` is a repository-wide GitHub
-> variable, so a push to the existing `staging` branch would run
-> `railway up --service fatcat-worker` against an environment with no such service and
-> fail the job. We never push that branch, so it never fires.
+Isolation is therefore achieved at the **infrastructure** layer, not the source layer. Staging
+runs the same repositories and branches as production, with its own database, cache, services,
+app deployment and contracts. Railway deploys a service directly from a GitHub repository, so a
+separate staging project gives a backend running identical code **without any change to the
+product repositories** — no new branch, no CI edit, no workflow change.
 
 ---
 
-## What lives here
+## Layout
 
 ```
 hl-sim/     Hyperliquid simulator — REST info endpoints + WebSocket topics.
-            Removes the upstream rate-limit ceiling so the internal limits can be measured.
-k6/         Load scenarios. Ported from the workspace `loadtest/` set, plus the
-            SSE assertions that set never had.
+            Lets the system under test be driven past the upstream vendor's
+            rate limits, which otherwise bind long before anything internal does.
+k6/         Load scenarios.
 docs/       RUNBOOK.md — the ordered environment build.
-            ARCHITECTURE.md — what breaks at 10k and in which order.
-scripts/    Helpers for provisioning and verification.
 ```
 
----
+## hl-sim
 
-## The ceilings this exists to measure
+```bash
+cd hl-sim
+npm install
+APP_ENV=staging npm start          # refuses to start otherwise, by design
+npm test                           # contract test — see below
+```
 
-Production is capped by Hyperliquid long before any internal limit is reached: one live
-duel costs ~2,028 request-weight/minute against a documented **1,200/min per-IP** budget,
-and user-specific WebSocket subscriptions cap at **10 unique users per IP** — two fighters
-per duel, so five concurrent duels. Those are external ceilings; no amount of internal
-work moves them.
+| Endpoint | |
+|---|---|
+| `POST /info` | the Hyperliquid info API |
+| `WS /ws` | `fastAssetCtxs`, `userFills` |
+| `GET /healthz` | liveness |
+| `GET /sim/metrics` | request counters and derived rates |
+| `POST /sim/override` | scenario control (force an outcome, a flat account) |
 
-Simulating Hyperliquid removes them, which is the only way to discover what the system's
-*own* limits are. Measured from code, in the order they are expected to bite:
+Environment: `APP_ENV=staging` (required), `PORT`, and `SIM_FAULT` = `429` \| `timeout` \|
+`500` for fault injection.
 
-| # | Ceiling | Mechanism |
-|---|---|---|
-| 1 | **~2–4 duels/second scored** | `DUEL_TICK_CONCURRENCY = 4` with ~14 sequential round-trips per duel. Failure mode is score staleness, counted by `hlc_pass_overrun_total` |
-| 2 | **1,000 concurrent duels** | Two unbounded `select("*")` scans; PostgREST silently caps at 1,000 rows. Already caused one production defect elsewhere in the codebase |
-| 3 | **~26,000 PostgREST req/s** | 13 DB round-trips per duel per 5 s pass at production flag values |
-| 4 | **720,000 rows/minute** | `duel_event_coverage`, written unconditionally even for empty windows, with no retention |
-| 5 | **~50 chain tx/second** | Serial settlement, one keeper EOA, no batch entrypoint on `FatCatDuelEscrowV2` |
-| 6 | **40,000 queries/s** | `market-hub`, unflagged, 4 queries per watched duel per second |
-| 7 | **~2 min pool refresh** | `bet-materialiser` lock-step at 200 pools/pass |
-| 8 | **~8,500 Upstash cmd/s** | One rate-limiter round-trip per API request, no in-memory tier |
+### The contract test is the gate
 
-`docs/ARCHITECTURE.md` carries the evidence for each.
+`npm test` in `hl-sim/` asserts the response shapes that, when wrong, cause the system under
+test to compute a wrong answer **silently** rather than fail. Hyperliquid returns most numbers
+as strings, and a wrong type there does not raise — it mis-scores.
 
----
+Three defects it caught during development, each of which would have produced confident wrong
+measurements:
+
+- `userAbstraction` returns a bare JSON string, not an object.
+- `fastAssetCtxs` frames are base64 of raw-DEFLATE JSON, shaped as a flat `{coin: {markPx}}`
+  map, with no snapshot flag — the first message after each subscribe is positionally the full
+  snapshot.
+- Spot `universe.name` must equal `"@" + universe.index`, and market context joins by name,
+  never by array position.
+
+**Do not trust a run whose contract test is red.**
 
 ## Hard rules
 
-1. **Never point this at production.** Every k6 scenario refuses known production
-   hostnames, and the simulator refuses to start unless `APP_ENV=staging`.
-2. **No secrets in this repository, ever.** They live in Railway and Vercel.
-3. **Testnet only.** `HL_ENV` and `NEXT_PUBLIC_HL_ENV` stay on testnet.
-4. **A load test needs its own Redis.** Staging and production currently share one Upstash
-   instance; the rate limiter fails open, so a load test against a shared instance can
-   silently strip production of rate limiting. See `docs/RUNBOOK.md` step 2.
-
-## Status
-
-Environment build in progress — see `docs/RUNBOOK.md` for what is done and what is
-blocked on account access.
+1. **Never point this at production.** Every k6 scenario refuses known production hostnames,
+   and the simulator refuses to start unless `APP_ENV=staging`.
+2. **No secrets in this repository, ever.** They belong in the deployment platform.
+3. **Testnet only.**
+4. **Verify isolation before generating load.** `docs/RUNBOOK.md` step 9 — a staging worker
+   pointed at a production resource does not error, it simply starts acting on production data.
