@@ -23,8 +23,19 @@ function hashUnit(address, salt) {
  *  row in metaAndAssetCtxs, which the scorer parses on every pass. */
 export const PERP_ASSETS = ["BTC", "ETH", "SOL", "HYPE", "PEPE"];
 
-/** Spot pairs, addressed as @index the way Hyperliquid does. */
-export const SPOT_ASSETS = ["@50", "@476", "@1035", "@1137", "@1165", "@1253"];
+/**
+ * Spot pairs. Hyperliquid addresses these as `@<index>`, and the backend
+ * requires `universe.name === "@" + universe.index`, so the index is the
+ * identity here — not the array position.
+ */
+export const SPOT_ASSETS = [
+  { index: 50, price: 1.0 },
+  { index: 476, price: 2.5 },
+  { index: 1035, price: 0.75 },
+  { index: 1137, price: 12.0 },
+  { index: 1165, price: 0.031 },
+  { index: 1253, price: 105.0 },
+];
 
 const BASE_PRICE = { BTC: 64000, ETH: 3200, SOL: 150, HYPE: 22, PEPE: 0.0000091 };
 

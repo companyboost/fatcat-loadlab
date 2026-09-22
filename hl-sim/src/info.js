@@ -12,6 +12,7 @@ import {
   buildL2Book,
   buildMetaAndAssetCtxs,
   buildSpotClearinghouseState,
+  buildSpotMeta,
   buildSpotMetaAndAssetCtxs,
   buildUserAbstraction,
   buildUserFillsByTime,
@@ -52,6 +53,12 @@ export function handleInfo(body) {
 
     case "spotMetaAndAssetCtxs":
       return buildSpotMetaAndAssetCtxs(now, SPOT_ASSETS);
+
+    // Called bare by duel-scoring-service, hl-faucet and prediction-rail. It
+    // must be element 0 of the tuple above; the last two THROW if no token is
+    // named exactly "USDC".
+    case "spotMeta":
+      return buildSpotMeta(SPOT_ASSETS);
 
     case "l2Book":
       return buildL2Book(body.coin, now);

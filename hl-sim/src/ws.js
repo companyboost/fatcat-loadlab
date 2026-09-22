@@ -14,9 +14,38 @@
 // nothing about the real 10-user cap. Recorded here so nobody later reads a
 // passing test as evidence the cap was solved.
 
-import { markPrice, PERP_ASSETS } from "./world.js";
-import { buildAssetCtxs, buildFillEvent } from "./shapes.js";
+import { deflateRawSync } from "node:zlib";
+import { markPrice, PERP_ASSETS, SPOT_ASSETS, px } from "./world.js";
+import { buildFillEvent } from "./shapes.js";
 import { inc } from "./metrics.js";
+
+/**
+ * ⚠️ `fastAssetCtxs` frames are NOT plain JSON.
+ *
+ * The SDK decodes `data` with `DecompressionStream("deflate-raw")`, so the
+ * wire value is base64(raw-DEFLATE(JSON)). Sending plain JSON here means the
+ * decode throws, no mark ever lands, `mark-stream` never goes live, and every
+ * score comes back `mark_stale` — with nothing in the logs pointing here.
+ *
+ * The decompressed payload is a flat map, not an array:
+ *   { "<coin>": { "markPx": "<decimal string>", "midPx": "<string|null>" } }
+ * Only `markPx` is read, and only when it is a string.
+ */
+function encodeCtxFrame(ctxMap) {
+  const raw = Buffer.from(JSON.stringify(ctxMap), "utf8");
+  return JSON.stringify({ channel: "fastAssetCtxs", data: deflateRawSync(raw).toString("base64") });
+}
+
+function buildCtxMap(nowMs) {
+  const out = {};
+  for (const coin of PERP_ASSETS) {
+    out[coin] = { markPx: px(markPrice(coin, nowMs)), midPx: px(markPrice(coin, nowMs)) };
+  }
+  for (const a of SPOT_ASSETS) {
+    out[`@${a.index}`] = { markPx: px(a.price), midPx: px(a.price) };
+  }
+  return out;
+}
 
 /** address (lowercased) -> Set<ws> */
 const fillSubs = new Map();
@@ -29,12 +58,12 @@ export function startMarkFeed() {
   if (markTimer) return;
   // The real feed pushes continuously. One second matches what the backend
   // persists (mark_snapshots, ~1/s) without pretending to more fidelity.
+  // `MARK_MAX_AGE_MS` is 3,000 and freshness is judged on the time of the LAST
+  // message on the stream, not per asset. So this must tick well inside 3s even
+  // when nothing moved, or every score goes `mark_stale`.
   markTimer = setInterval(() => {
     if (ctxSubs.size === 0) return;
-    const frame = JSON.stringify({
-      channel: "activeAssetCtx",
-      data: buildAssetCtxs(Date.now(), false),
-    });
+    const frame = encodeCtxFrame(buildCtxMap(Date.now()));
     // One serialised frame handed to every subscriber — the same O(streams)
     // discipline the backend's own hubs use. Serialising per socket here would
     // make the simulator the bottleneck at 10k.
@@ -51,16 +80,15 @@ export function startMarkFeed() {
 export function pushFill(address, fill) {
   const subs = fillSubs.get(address.toLowerCase());
   if (!subs || subs.size === 0) return 0;
-  const frame = JSON.stringify({
-    channel: "userFills",
-    data: buildFillEvent(address, [fill], false),
-  });
   let sent = 0;
   for (const ws of subs) {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(frame);
-      sent += 1;
-    }
+    if (ws.readyState !== ws.OPEN) continue;
+    // Echo `user` exactly as that socket subscribed with — see the note in the
+    // subscribe handler. Serialised per socket rather than once, because the
+    // address string is part of the payload; the subscriber count per address
+    // is tiny (one worker), so this is not the O(viewers) trap.
+    ws.send(JSON.stringify({ channel: "userFills", data: buildFillEvent(ws.userAddr ?? address, [fill], false) }));
+    sent += 1;
   }
   inc("ws_fill_frames_total", sent);
   return sent;
@@ -90,36 +118,58 @@ export function attachSocket(ws) {
     const sub = msg.subscription ?? {};
     const subscribing = msg.method === "subscribe";
 
-    if (sub.type === "activeAssetCtx" || sub.type === "fastAssetCtxs") {
+    if (sub.type === "fastAssetCtxs") {
+      // The ack must come FIRST and must echo the subscription, or the SDK's
+      // pending request never resolves and `subscribe failed` fires after its
+      // 10s timeout. Matching is by subset, so extra fields are harmless.
+      ws.send(
+        JSON.stringify({
+          channel: "subscriptionResponse",
+          data: { method: msg.method, subscription: sub },
+        }),
+      );
       if (subscribing) {
         ctxSubs.add(ws);
         ws.subscriptions.add("ctx");
-        // Snapshot first, then deltas — the backend judges freshness by stream
-        // health and refuses rows until a snapshot has landed.
-        ws.send(
-          JSON.stringify({ channel: "activeAssetCtx", data: buildAssetCtxs(Date.now(), true) }),
-        );
+        // There is NO isSnapshot flag on this channel. The contract is
+        // positional: the first message after every (re)subscribe is a FULL
+        // map, and later messages may carry only changed coins. `mark-stream`
+        // clears its entire map on that first message, so sending a partial
+        // delta first permanently loses every coin it omits.
+        ws.send(encodeCtxFrame(buildCtxMap(Date.now())));
       } else {
         ctxSubs.delete(ws);
       }
-      ws.send(JSON.stringify({ channel: "subscriptionResponse", data: { method: msg.method, subscription: sub } }));
       return;
     }
 
     if (sub.type === "userFills" && sub.user) {
-      const key = String(sub.user).toLowerCase();
+      // ⚠️ The SDK filters incoming events with `event.user === payload.user`,
+      // an EXACT string comparison — the case-insensitive hex matching applies
+      // only to the subscriptionResponse echo. Our backend subscribes with an
+      // already-lowercased address, so every frame must echo `user` back
+      // byte-identical or the events are silently dropped. Key on the address
+      // exactly as sent, not on a re-normalised copy.
+      const asSent = String(sub.user);
+      const key = asSent.toLowerCase();
+      ws.send(
+        JSON.stringify({
+          channel: "subscriptionResponse",
+          data: { method: msg.method, subscription: sub },
+        }),
+      );
       if (subscribing) {
         if (!fillSubs.has(key)) fillSubs.set(key, new Set());
         fillSubs.get(key).add(ws);
+        ws.userAddr = asSent;
         ws.subscriptions.add(`fills:${key}`);
         inc("ws_unique_users_seen");
-        // isSnapshot: true on the first message, matching the venue. The
-        // backend distinguishes snapshot from delta to avoid double-counting.
-        ws.send(JSON.stringify({ channel: "userFills", data: buildFillEvent(key, [], true) }));
+        // isSnapshot is informational to the backend — it does not branch on
+        // it and relies on `address:hash:tid` for idempotence instead.
+        ws.send(JSON.stringify({ channel: "userFills", data: buildFillEvent(asSent, [], true) }));
       } else {
         fillSubs.get(key)?.delete(ws);
       }
-      ws.send(JSON.stringify({ channel: "subscriptionResponse", data: { method: msg.method, subscription: sub } }));
       return;
     }
 

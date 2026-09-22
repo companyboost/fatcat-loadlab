@@ -122,9 +122,58 @@ keeps talking to real Hyperliquid, and the mark stream gates whether snapshot ro
 at all, so the simulator would appear to work while scoring silently depended on the real
 venue.
 
-This is the **one change required in `fatcat-backend`** (a ~5-line additive change threading an
-optional URL into those two constructors, defaulting to today's behaviour). It is the only
-product-repo edit in this plan and it needs its own PR.
+Good news from the contract extraction: **the SDK already supports this.**
+`WebSocketTransport` accepts `options.url` and uses it verbatim with no path suffix
+(`esm/transport/websocket/mod.js:66-68`), falling back to `isTestnet` when absent. So the
+change in `fatcat-backend` is genuinely small and purely additive:
+
+```ts
+// src/lib/env.ts, beside HL_API_URL at :283
+HL_WS_URL: opt("HL_WS_URL"),
+
+// src/lib/mark-stream.ts:81 and src/lib/fill-stream.ts:228, in both constructors
+...(env.HL_WS_URL ? { url: env.HL_WS_URL } : {}),
+```
+
+Spread, so an unset value leaves today's behaviour byte-for-byte unchanged. Worth considering a
+shared `makeWsTransport()` alongside `makeInfoClient()` so a third call site cannot be added
+unrouted — that is a plan decision, not a drive-by.
+
+> ⚠️ **`HL_API_URL` does not catch everything either.** It is honoured only by
+> `makeInfoClient()`. Two other `HttpTransport`s are constructed without it and will still reach
+> the real venue from staging: `src/lib/hl-faucet.ts:17` and
+> `src/lib/prediction-return-worker.ts:326`. Route them through the same override, or disable the
+> faucet and the return worker on staging. Left as-is, staging quietly consumes production's
+> Hyperliquid budget — the precise failure this environment exists to avoid.
+
+### Contract test — the gate on trusting any of this ✅
+
+`hl-sim` ships `test/contract.test.js`, which pins the shapes that break the backend *silently*
+rather than loudly. **10/10 passing**, and verified red-then-green against a real bug (see below).
+Run `npm test` in `hl-sim/` before trusting any measurement.
+
+Three genuine defects it caught in the first draft, all of which would have produced confident
+wrong numbers:
+
+1. **`userAbstraction` returns a bare JSON string**, not an object. An object normalises to
+   `unknown`, and `hl-consumer.ts:432` then throws `unsupported Hyperliquid account mode` on
+   every pass, aborting each fighter snapshot. Shown red:
+   `AssertionError: an object here throws 'unsupported Hyperliquid account mode'`.
+2. **`fastAssetCtxs` frames are base64 of raw-DEFLATE JSON**, on channel `fastAssetCtxs`, shaped
+   as a flat `{coin: {markPx}}` map with **no `isSnapshot` flag** — the first message after each
+   subscribe is positionally the full snapshot, and `mark-stream` clears its whole map on it.
+   Plain JSON here means no mark ever lands and every score reads `mark_stale`.
+3. **Spot `universe.name` must equal `"@" + universe.index`** (`hl-consumer.ts:383`), and
+   `ctx.coin` joins by name, never by array position. The draft numbered indices 0..n while
+   naming pairs `@476`, so the consumer's equity walk skipped every market.
+
+Two more rules the test enforces, because both fail quietly:
+
+- Every monetary string must survive `parseScaled`'s strict regex (`duel-score.ts:32`) — no
+  exponent notation, no leading `+`, no empty string. A failure yields `basis_unreadable` and a
+  frozen score, not an error.
+- `userNonFundingLedgerUpdates` must default to `[]`. Any transfer-type delta inside a duel
+  window parks **every** duel in `review_required`.
 
 ---
 

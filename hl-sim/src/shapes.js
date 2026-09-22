@@ -70,9 +70,22 @@ export function buildSpotClearinghouseState(address, nowMs) {
   };
 }
 
-/** `userAbstraction` — the account-mode read. */
-export function buildUserAbstraction(address) {
-  return { type: "unabstracted", address };
+/**
+ * `userAbstraction` — the account-mode read.
+ *
+ * ⚠️ The response is a BARE JSON STRING, not an object. Returning an object
+ * here makes `normalizeHyperliquidAccountMode` yield `unknown`, which makes
+ * `hl-consumer.ts:432` THROW "unsupported Hyperliquid account mode" and abort
+ * the fighter's snapshot on every single pass. The live card then freezes and
+ * the cause is three files away. This was wrong in the first draft.
+ *
+ * Only two modes produce a usable equity:
+ *   "default" | "disabled"      -> spot USDC total + perp accountValue
+ *   "unifiedAccount"            -> spot USDC total ONLY (perps would double-count)
+ * Anything else throws. We serve "default".
+ */
+export function buildUserAbstraction() {
+  return "default";
 }
 
 /** A synthetic fill. `tid` and `hash` must be stable per fill: the backend
@@ -180,24 +193,77 @@ export function buildFillEvent(address, fills, isSnapshot) {
   return { isSnapshot: Boolean(isSnapshot), user: address, fills };
 }
 
-/** `spotMetaAndAssetCtxs` */
-export function buildSpotMetaAndAssetCtxs(nowMs, spotAssets) {
-  const tokens = [{ name: "USDC", szDecimals: 8, weiDecimals: 8, index: 0, isCanonical: true }];
-  const universe = spotAssets.map((name, i) => ({
-    name,
-    tokens: [i + 1, 0],
-    index: i,
+/**
+ * `spotMeta` — element 0 of the tuple below, served on its own too.
+ *
+ * `prediction-rail.ts:86` and `hl-faucet.ts:44` THROW "USDC spot token not
+ * found in spotMeta" if no token is named exactly "USDC", and they read its
+ * `tokenId` and `weiDecimals`.
+ */
+export function buildSpotMeta(spotAssets) {
+  const tokens = [
+    {
+      name: "USDC",
+      szDecimals: 8,
+      weiDecimals: 8,
+      index: 0,
+      tokenId: "0x6d1e7cde53ba9467b783cb7c530ce054",
+      isCanonical: true,
+      evmContract: null,
+      fullName: null,
+      deployerTradingFeeShare: "0.0",
+    },
+    ...spotAssets.map((a, i) => ({
+      name: `SIM${i}`,
+      szDecimals: 5,
+      weiDecimals: 8,
+      index: a.index,
+      tokenId: `0x${String(a.index).padStart(32, "0")}`,
+      isCanonical: false,
+      evmContract: null,
+      fullName: `Simulated ${i}`,
+      deployerTradingFeeShare: "0.0",
+    })),
+  ];
+
+  // ⚠️ `hl-consumer.ts:383` requires `universe.name === "@" + universe.index`.
+  // The first draft numbered `index` 0..n while naming the pair "@476", so the
+  // consumer's equity walk skipped every market and spot scoring silently saw
+  // nothing. Name and index must agree.
+  const universe = spotAssets.map((a) => ({
+    name: `@${a.index}`,
+    tokens: [a.index, 0],
+    index: a.index,
     isCanonical: false,
   }));
-  const ctxs = spotAssets.map((coin, i) => ({
-    coin,
-    markPx: px(1 + i),
-    midPx: px(1 + i),
-    prevDayPx: px(1 + i),
-    dayNtlVlm: usd(100_000),
-    circulatingSupply: usd(1_000_000),
-  }));
-  return [{ tokens, universe }, ctxs];
+
+  return { tokens, universe };
+}
+
+/**
+ * `spotMetaAndAssetCtxs` — the [meta, ctxs] 2-tuple.
+ *
+ * The mark is joined to the market by `ctx.coin`, never by array position, so
+ * `ctx.coin` must equal `universe.name`. `spot-market-map.ts` also drops any
+ * market whose mark fails `^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$` or is <= 0 — no
+ * leading zeros, no leading '+', and no exponent notation.
+ */
+export function buildSpotMetaAndAssetCtxs(nowMs, spotAssets) {
+  const meta = buildSpotMeta(spotAssets);
+  const ctxs = spotAssets.map((a) => {
+    const mark = a.price;
+    return {
+      coin: `@${a.index}`,
+      markPx: px(mark),
+      midPx: px(mark),
+      prevDayPx: px(mark * 0.99),
+      dayNtlVlm: usd(100_000),
+      circulatingSupply: usd(1_000_000),
+      totalSupply: usd(1_000_000),
+      dayBaseVlm: usd(1_000),
+    };
+  });
+  return [meta, ctxs];
 }
 
 /** `l2Book` — a deliberately tight, tradeable book so the spot-liquidity gate opens. */
