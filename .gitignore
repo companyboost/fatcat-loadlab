@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.log
+
+# Nothing environment-specific belongs in this repo. Secrets live in the
+# platform (Railway / Vercel), never here. These patterns are a backstop, not
+# a licence to keep a local copy.
+.env
+.env.*
+!.env.example
+*.env
+env.secrets
+env.download
+admin-local.env
+.vercel/
+.railway/
+
+# Load-test output can contain staging hostnames and user ids.
+results/
+*.json.gz
+summary-*.json

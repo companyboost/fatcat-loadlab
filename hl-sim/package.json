@@ -1,0 +1,16 @@
+{
+  "name": "fatcat-hl-sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hyperliquid simulator for the FatCat staging environment. Never for production use.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
