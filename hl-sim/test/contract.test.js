@@ -133,6 +133,39 @@ test("an unhandled info type is not answered", () => {
   assert.equal(handleInfo({ type: "somethingNobodyImplemented" }), undefined);
 });
 
+/** The backend's own parser, copied verbatim from hl-transport.ts:195-199.
+ *  `usdcRouting` is read through this rather than through the SDK, and it
+ *  returns null for ANY shape it does not recognise. */
+function parseUsdcRouting(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const { depositRoute, withdrawalRoute } = raw;
+  const known = (r) => r === "cctp" || r === "bridge";
+  return known(depositRoute) && known(withdrawalRoute) ? { depositRoute, withdrawalRoute } : null;
+}
+
+/** `usdcRouting` must be answered, and must survive that parser.
+ *
+ *  readUsdcRouting (hl-transport.ts:207) swallows every error and yields null,
+ *  and its doc comment is explicit that "callers MUST fail closed on null,
+ *  never assume a route". So leaving this type unimplemented does not surface
+ *  as a simulator error — it surfaces as:
+ *    - every personal withdrawal refused with 503 withdraw_route_unavailable;
+ *    - /health reporting backing: "unknown", because health-stake.ts:64 reads
+ *      it inside orNull() while building the reserves block;
+ *    - and therefore a failed upstream read on every /health poll, which a
+ *      load test makes continuous.
+ *  `cctp` on both legs is the live route per the backend's 2026-09-24 CCTP
+ *  change. */
+test("usdcRouting is answered and survives the backend's own parser", () => {
+  const raw = handleInfo({ type: "usdcRouting" });
+  assert.notEqual(
+    raw,
+    undefined,
+    "unanswered: the backend fails closed, withdrawals 503 and /health 5xxes on every poll",
+  );
+  assert.deepEqual(parseUsdcRouting(raw), { depositRoute: "cctp", withdrawalRoute: "cctp" });
+});
+
 test("every perp mark in a fastAssetCtxs frame survives deflate and parseScaled", async () => {
   const { startMarkFeed } = await import("../src/ws.js");
   assert.equal(typeof startMarkFeed, "function");
