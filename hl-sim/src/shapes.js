@@ -292,6 +292,19 @@ export function buildUserRateLimit() {
   return { cumVlm: usd(10_000_000), nRequestsUsed: 0, nRequestsCap: 10_000_000 };
 }
 
+/** `usdcRouting` — which rail USDC moves on, read by the backend through its
+ *  OWN parser (`parseUsdcRouting`, hl-transport.ts:195) and not via the SDK.
+ *  Both legs must be exactly "cctp" or "bridge" or that parser yields null,
+ *  and callers are required to fail closed on null: withdrawals then refuse
+ *  with 503 withdraw_route_unavailable, and /health reports
+ *  backing: "unknown" because the reserves block reads this inside orNull().
+ *  `cctp` on both legs is the live route — Hyperliquid moved USDC to CCTP on
+ *  both networks and `withdraw3` has refused every size since 2026-09-19,
+ *  which is what the backend's 2026-09-24 change was for. */
+export function buildUsdcRouting() {
+  return { depositRoute: "cctp", withdrawalRoute: "cctp" };
+}
+
 /** `candleSnapshot` */
 export function buildCandleSnapshot(coin, interval, startTime, endTime) {
   const step = 60_000;

@@ -19,6 +19,7 @@ import {
   buildUserFunding,
   buildUserNonFundingLedger,
   buildUserRateLimit,
+  buildUsdcRouting,
 } from "./shapes.js";
 
 export function handleInfo(body) {
@@ -68,6 +69,9 @@ export function handleInfo(body) {
 
     case "userRateLimit":
       return buildUserRateLimit();
+
+    case "usdcRouting":
+      return buildUsdcRouting();
 
     case "candleSnapshot": {
       const req = body.req ?? {};
