@@ -46,6 +46,12 @@ export function handleInfo(body) {
     case "userFunding":
       return buildUserFunding(user, body.startTime ?? now - 60_000);
 
+    // A stub, not a model: the world has positions but never resting orders.
+    // If a scenario ever places orders through the simulator, this must start
+    // reporting them, or readiness will see a flat book that is not flat.
+    case "openOrders":
+      return [];
+
     case "userNonFundingLedgerUpdates":
       return buildUserNonFundingLedger(user, body.startTime ?? now - 60_000);
 
