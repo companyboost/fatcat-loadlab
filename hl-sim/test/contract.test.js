@@ -166,6 +166,24 @@ test("usdcRouting is answered and survives the backend's own parser", () => {
   assert.deepEqual(parseUsdcRouting(raw), { depositRoute: "cctp", withdrawalRoute: "cctp" });
 });
 
+/** `openOrders` must be answered with an array.
+ *
+ *  account-identity-audit.ts:184 reads it for every linked wallet, and a
+ *  rejected read (our 501) is recorded as hl_orders_unavailable. That marks
+ *  coverage incomplete, the repair becomes operator_assisted, and
+ *  POST /me/accounts/personal/select answers 409
+ *  personal_selection_review_required, so no one can finish /setup on staging.
+ *  competition-readiness.ts:358 and competition-return-check.ts:89 read it too,
+ *  and feed it to ordersInArena (competition-readiness.ts:258), which filters
+ *  by `coin`. The world model has positions but never resting orders, so the
+ *  answer is an empty list. That is a stub, not a model: a scenario that
+ *  places orders through the simulator must make this report them. */
+test("openOrders is answered with an array", () => {
+  const raw = handleInfo({ type: "openOrders", user: ADDR });
+  assert.ok(Array.isArray(raw), "unanswered: wallet setup 409s and readiness fails closed");
+  assert.equal(raw.length, 0, "the simulated world has no resting orders");
+});
+
 test("every perp mark in a fastAssetCtxs frame survives deflate and parseScaled", async () => {
   const { startMarkFeed } = await import("../src/ws.js");
   assert.equal(typeof startMarkFeed, "function");
